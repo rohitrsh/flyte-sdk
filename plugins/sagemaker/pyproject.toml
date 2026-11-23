@@ -17,6 +17,7 @@ dev = [
 ]
 
 [project.entry-points."flyte.connectors"]
+boto = "flyteplugins.sagemaker.connector:BotoConnector"
 sagemaker-training = "flyteplugins.sagemaker.connector:SageMakerTrainingConnector"
 sagemaker-processing = "flyteplugins.sagemaker.connector:SageMakerProcessingConnector"
 sagemaker-transform = "flyteplugins.sagemaker.connector:SageMakerTransformConnector"

@@ -1,12 +1,16 @@
 """AWS SageMaker managed job connectors for Flyte."""
 
 from flyteplugins.sagemaker.connector import (
+    BotoCallMetadata,
+    BotoConnector,
     SageMakerJobMetadata,
     SageMakerProcessingConnector,
     SageMakerTrainingConnector,
     SageMakerTransformConnector,
 )
 from flyteplugins.sagemaker.task import (
+    Boto,
+    BotoFunctionTask,
     SageMakerProcessingFunctionTask,
     SageMakerProcessingJob,
     SageMakerTrainingFunctionTask,
@@ -16,6 +20,10 @@ from flyteplugins.sagemaker.task import (
 )
 
 __all__ = [
+    "Boto",
+    "BotoCallMetadata",
+    "BotoConnector",
+    "BotoFunctionTask",
     "SageMakerJobMetadata",
     "SageMakerProcessingConnector",
     "SageMakerProcessingFunctionTask",

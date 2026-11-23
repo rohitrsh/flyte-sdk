@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -10,11 +13,13 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from flyte.connectors import AsyncConnector, ConnectorRegistry, Resource, ResourceMeta
+from flyteidl2.connector.connector_pb2 import TaskExecutionMetadata
 from flyteidl2.core.execution_pb2 import TaskExecution, TaskLog
 from flyteidl2.core.tasks_pb2 import TaskTemplate
 from google.protobuf.json_format import MessageToDict
 
 from flyteplugins.sagemaker.task import (
+    BOTO_TASK_TYPE,
     PROCESSING_TASK_TYPE,
     TRAINING_TASK_TYPE,
     TRANSFORM_TASK_TYPE,
@@ -29,6 +34,8 @@ _RETRYABLE_ERROR_CODES = {
     "ThrottlingException",
     "TooManyRequestsException",
 }
+_SERVICE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_METHOD_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _restore_integer_values(value: Any) -> Any:
@@ -53,6 +60,31 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_json_safe(item) for item in value]
     return value
+
+
+def _replace_idempotence_token(value: Any, token: str) -> Any:
+    if isinstance(value, str):
+        return value.replace("{idempotence_token}", token)
+    if isinstance(value, list):
+        return [_replace_idempotence_token(item, token) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_idempotence_token(item, token) for key, item in value.items()}
+    return value
+
+
+def _execution_token(
+    metadata: Optional[TaskExecutionMetadata],
+    custom: Dict[str, Any],
+) -> str:
+    if metadata is not None and metadata.HasField("task_execution_id"):
+        source = metadata.task_execution_id.SerializeToString()
+    else:
+        source = json.dumps(
+            custom,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    return hashlib.sha256(source).hexdigest()[:32]
 
 
 @dataclass(frozen=True)
@@ -279,6 +311,71 @@ class SageMakerTransformConnector(SageMakerManagedJobConnector):
     definition = _TRANSFORM
 
 
+@dataclass
+class BotoCallMetadata(ResourceMeta):
+    response: Dict[str, Any]
+    output_key: Optional[str]
+    idempotence_token: str
+
+
+class BotoConnector(AsyncConnector[BotoCallMetadata]):
+    """Invoke one boto3 operation and return its JSON-safe response."""
+
+    name = "Boto Connector"
+    task_type_name = BOTO_TASK_TYPE
+    metadata_type = BotoCallMetadata
+
+    async def create(
+        self,
+        task_template: TaskTemplate,
+        output_prefix: str,
+        inputs: Optional[Dict[str, Any]] = None,
+        task_execution_metadata: Optional[TaskExecutionMetadata] = None,
+        **kwargs: Any,
+    ) -> BotoCallMetadata:
+        custom = MessageToDict(task_template.custom) if task_template.custom else {}
+        custom = _restore_integer_values(custom)
+        service = custom.get("service") or ""
+        method = custom.get("method") or ""
+        region = custom.get("region") or None
+        if not _SERVICE_NAME.fullmatch(service):
+            raise ValueError(f"Invalid boto3 service name {service!r}")
+        if not _METHOD_NAME.fullmatch(method):
+            raise ValueError(f"Invalid boto3 method name {method!r}")
+
+        token = _execution_token(task_execution_metadata, custom)
+        request = _replace_idempotence_token(custom.get("request") or {}, token)
+        client = boto3.client(service, region_name=region, config=_BOTO_CONFIG)
+        operation = getattr(client, method, None)
+        if operation is None or not callable(operation):
+            raise ValueError(f"Boto3 client {service!r} has no public method {method!r}")
+        response = await asyncio.to_thread(operation, **request)
+        response.pop("ResponseMetadata", None)
+
+        outputs = [variable.key for variable in task_template.interface.outputs.variables]
+        if len(outputs) > 1:
+            raise ValueError("Boto tasks support at most one Flyte output")
+        return BotoCallMetadata(
+            response=_json_safe(response),
+            output_key=outputs[0] if outputs else None,
+            idempotence_token=token,
+        )
+
+    async def get(self, resource_meta: BotoCallMetadata, **kwargs: Any) -> Resource:
+        outputs = {resource_meta.output_key: resource_meta.response} if resource_meta.output_key else {}
+        return Resource(
+            phase=TaskExecution.SUCCEEDED,
+            outputs=outputs,
+            custom_info={
+                "idempotence_token": resource_meta.idempotence_token,
+            },
+        )
+
+    async def delete(self, resource_meta: BotoCallMetadata, **kwargs: Any) -> None:
+        return None
+
+
 ConnectorRegistry.register(SageMakerTrainingConnector())
 ConnectorRegistry.register(SageMakerProcessingConnector())
 ConnectorRegistry.register(SageMakerTransformConnector())
+ConnectorRegistry.register(BotoConnector())

@@ -103,9 +103,43 @@ converted to JSON-safe values before being returned.
 - Completed, failed, and stopped jobs are not stopped again.
 - Missing jobs are treated as already deleted.
 
+## Generic boto operations
+
+`Boto` supports AWS operations that complete in one API call, such as creating
+or deleting a SageMaker model:
+
+```python
+from flyteplugins.sagemaker import Boto
+
+create_model = flyte.TaskEnvironment(
+    name="models",
+    plugin_config=Boto(
+        service="sagemaker",
+        method="create_model",
+        region="us-west-2",
+        request={
+            "ModelName": "model-{idempotence_token}",
+            "ExecutionRoleArn": "arn:aws:iam::123456789012:role/sagemaker-job",
+            "PrimaryContainer": {
+                "Image": "123456789012.dkr.ecr.us-west-2.amazonaws.com/inference:latest",
+            },
+        },
+    ),
+)
+```
+
+`{idempotence_token}` placeholders are replaced recursively with a stable token
+derived from the Flyte task execution identifier. The connector accepts only
+public boto3 client method names, strips transport metadata, and returns a
+JSON-safe response. AWS IAM remains the authorization boundary: the connector
+can call only operations and resources granted to its workload identity.
+
+This task type is intended for one-shot APIs. Long-running APIs belong in a
+dedicated async connector that can poll state and implement cancellation.
+
 ## Current scope
 
 This plugin submits managed boto3 job requests. Python function execution
 inside SageMaker containers, HyperPod configuration, model/endpoint operations,
-and a generic boto connector are separate follow-ups so each API and security
-boundary can be reviewed independently.
+and other long-running APIs are separate follow-ups so each lifecycle and
+security boundary can be reviewed independently.
